@@ -1,17 +1,15 @@
 import os
-import re
 import sys
 from pathlib import Path
 import pandas as pd
 from pypdf import PdfWriter, PdfReader
 import win32com.client as win32
 from tkinter import Tk, filedialog
+import re
 
 # === КОНФИГУРАЦИЯ ===
-REFERENCE_XLSX = "Список ведомостей.xlsx"
-TEMPLATE_DOCX = "Ведомость (Текущая) Шаблон v.2.docx"
-
-# Сопоставление полного названия школы → код
+REFERENCE_XLSX = "C:/Users/alexd/OneDrive/Документы/Тестовая папка с ведомостями/Список ведомостей.xlsx"
+# Сопоставление школы → код
 SCHOOL_TO_CODE = {
     "МАОУ «Школа № 13 г. Благовещенска»": "13",
     "МАОУ «Школа № 16 г. Благовещенска»": "16",
@@ -29,148 +27,188 @@ SCHOOL_NAMES = {
 }
 
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
-
-def extract_school_code(full_name):
-    return SCHOOL_TO_CODE.get(full_name.strip(), None)
-
-
 def get_teacher_folder_name(teacher_fio):
     """Из 'Демьяненко А.Е.' → 'Демьяненко'"""
-    return teacher_fio.split()[0] if teacher_fio and isinstance(teacher_fio, str) else ""
+    if not isinstance(teacher_fio, str) or not teacher_fio.strip():
+        return ""
+    return teacher_fio.split()[0]
 
 
-def split_title_docx(template_path, output_dir):
-    """Автоматически разделяет Word-файл на 5 титульных PDF по школам."""
-    word = win32.gencache.EnsureDispatch('Word.Application')
-    word.Visible = False
-    doc = word.Documents.Open(os.path.abspath(template_path))
+def update_app_number_and_set_print_area(ws, app_num_from_ref):
+    """Находит ячейку с 'ПРИЛОЖЕНИЕ' в первой строке, обновляет номер и устанавливает область печати"""
+    try:
+        app_column = None
+        app_cell = None
 
-    # Порядок титулов в вашем файле:
-    title_order = [
-        ("16", "МАОУ «Школа № 16 г. Благовещенска»"),
-        ("АГ", "МАОУ «Алексеевская гимназия г. Благовещенска»"),
-        ("17", "МАОУ «Школа № 17 г. Благовещенска»"),
-        ("13", "МАОУ «Школа № 13 г. Благовещенска»"),
-        ("22", "МАОУ «Школа № 22 г. Благовещенска им. Ф.Э. Дзержинского»")
-    ]
+        # Ищем ячейку с "ПРИЛОЖЕНИЕ" в первой строке
+        for col in range(1, 50):  # проверяем первые 50 столбцов
+            cell_value = ws.Cells(1, col).Value
+            if cell_value and isinstance(cell_value, str) and "ПРИЛОЖЕНИЕ" in cell_value:
+                app_column = col
+                app_cell = ws.Cells(1, col)
+                break
 
-    full_text = doc.Range().Text
-    start = 0
-    for i, (code, school_name) in enumerate(title_order):
-        # Найти начало титула
-        pos = full_text.find(school_name, start)
-        if pos == -1:
-            print(f"⚠️ Не найден титул для {school_name}")
-            continue
+        if not app_cell:
+            print(f"  ⚠️ Не найдена ячейка с 'ПРИЛОЖЕНИЕ' в первой строке")
+            # Попробуем найти в других строках
+            for row in range(1, 5):
+                for col in range(1, 50):
+                    cell_value = ws.Cells(row, col).Value
+                    if cell_value and isinstance(cell_value, str) and "ПРИЛОЖЕНИЕ" in cell_value:
+                        app_column = col
+                        app_cell = ws.Cells(row, col)
+                        break
+                if app_cell:
+                    break
 
-        # Создать временный документ
-        temp_doc = word.Documents.Add()
-        # Копируем весь контент (проще всего — выделяем блок до следующего титула или конца)
-        end_pos = len(full_text)
-        if i < len(title_order) - 1:
-            next_school = title_order[i + 1][1]
-            next_pos = full_text.find(next_school, pos)
-            if next_pos != -1:
-                end_pos = next_pos
+        if not app_cell:
+            print(f"  ⚠️ Не найдена ячейка с 'ПРИЛОЖЕНИЕ' во всем заголовке")
+            return False
 
-        # Выделяем текст (в Word это сложно без точных позиций)
-        # Поэтому проще: сохраняем весь документ и делим вручную один раз
-        # → РЕКОМЕНДУЕМ: сохранить 5 title_*.docx вручную
-        temp_doc.Close()
+        # Обновляем номер приложения в ячейке на основе справочника
+        if app_num_from_ref:
+            # Обрабатываем случаи, когда номер приложения может быть не числом (например, "1-2")
+            if isinstance(app_num_from_ref, str) and '-' in app_num_from_ref:
+                new_text = f"ПРИЛОЖЕНИЕ №{app_num_from_ref}"
+            else:
+                new_text = f"ПРИЛОЖЕНИЕ №{app_num_from_ref}"
 
-    doc.Close()
-    word.Quit()
-    print("❗ Автоматическое разделение титулов сложно. Рекомендуется сохранить вручную:")
-    print("   title_13.docx, title_16.docx, title_17.docx, title_22.docx, title_АГ.docx")
-    return False  # сигнал, что нужно вручную
+            app_cell.Value = new_text
+            print(f"  ✏️ Обновлен номер приложения: {new_text}")
 
+        # Устанавливаем область печати - от A1 до столбца с ПРИЛОЖЕНИЕ
+        if app_column:
+            # Находим последнюю строку с данными (ищем в столбце A)
+            last_row = ws.Cells(ws.Rows.Count, 1).End(-4162).Row  # -4162 = xlUp
 
-# === ОСНОВНОЙ КОД ===
+            # Устанавливаем область печати до столбца с ПРИЛОЖЕНИЕ
+            end_col = app_column
+            print_area_range = ws.Range(ws.Cells(1, 1), ws.Cells(last_row, end_col))
+            ws.PageSetup.PrintArea = print_area_range.Address
+
+            print(f"  📏 Область печати установлена: A1:{chr(64 + end_col)}{last_row}")
+            return True
+        else:
+            print("  ⚠️ Не удалось определить столбец для области печати")
+            return False
+
+    except Exception as e:
+        print(f"  ⚠️ Ошибка при обновлении номера приложения и установке области печати: {e}")
+        return False
+
 
 def main():
-    # --- Шаг 1: Выбор папок ---
+    # --- Выбор папок ---
     root = Tk()
     root.withdraw()
-    input_folder = filedialog.askdirectory(title="Выберите папку с папками преподавателей")
+    input_folder = filedialog.askdirectory(
+        title="Выберите папку с папками преподавателей",
+        initialdir=r"C:/Users/alexd/OneDrive/Документы/Тестовая папка с ведомостями"
+    )
     if not input_folder:
-        print("❌ Папка не выбрана. Выход.")
+        print("❌ Не выбрана входная папка")
         return
-    output_folder = filedialog.askdirectory(title="Выберите папку для сохранения PDF")
+
+    output_folder = filedialog.askdirectory(
+        title="Выберите папку для сохранения итоговых PDF",
+        initialdir=input_folder
+    )
     if not output_folder:
-        print("❌ Папка вывода не выбрана. Выход.")
+        print("❌ Не выбрана выходная папка")
         return
 
     os.makedirs(output_folder, exist_ok=True)
 
-    # --- Шаг 2: Загрузка справочника ---
+    # --- Загрузка справочника ---
     try:
         df = pd.read_excel(REFERENCE_XLSX, sheet_name="Лист1", dtype=str)
     except Exception as e:
-        print(f"❌ Ошибка при чтении {REFERENCE_XLSX}: {e}")
+        print(f"❌ Ошибка при чтении справочника:\n{e}")
         return
 
     # Оставляем только строки с названием листа
     df = df.dropna(subset=["Название листа"])
     print(f"✅ Загружено {len(df)} ведомостей для обработки.")
 
-    # Словарь: название_листа → (номер_приложения, код_школы, фамилия_преподавателя)
-    sheet_info = {}
+    # Словарь: фамилия_преподавателя → {название_листа → (номер_приложения, код_школы)}
+    sheet_info_by_teacher = {}
+
     for _, row in df.iterrows():
         sheet_name = row["Название листа"].strip()
-        try:
-            app_num = int(float(row["Номер Приложения"]))
-        except:
-            print(f"⚠️ Пропущен лист '{sheet_name}': некорректный номер приложения")
-            continue
+        app_num = row["Номер Приложения"].strip() if pd.notna(row["Номер Приложения"]) else ""
+
         school_full = row["Школа"]
-        school_code = extract_school_code(school_full)
+        school_code = SCHOOL_TO_CODE.get(school_full.strip())
         if not school_code:
             print(f"⚠️ Неизвестная школа для листа '{sheet_name}': {school_full}")
             continue
+
         teacher_fio = row["ФИО Преподавателя"]
         teacher_folder = get_teacher_folder_name(teacher_fio)
-        sheet_info[sheet_name] = (app_num, school_code, teacher_folder)
 
-    # --- Шаг 3: Поиск Excel-файлов ---
+        if teacher_folder not in sheet_info_by_teacher:
+            sheet_info_by_teacher[teacher_folder] = {}
+
+        # Сохраняем информацию о листе для этого преподавателя
+        sheet_info_by_teacher[teacher_folder][sheet_name] = (app_num, school_code)
+
+    # --- Поиск Excel-файлов ---
     all_excel_files = []
-    for teacher_dir in Path(input_folder).iterdir():
-        if teacher_dir.is_dir():
-            for f in teacher_dir.glob("*.xlsx"):
-                all_excel_files.append(f)
+    found_teachers = set()
+
+    for item in Path(input_folder).iterdir():
+        if item.is_dir():
+            teacher_name = item.name
+            found_teachers.add(teacher_name)
+            for f in item.glob("*.xlsx"):
+                all_excel_files.append((f, teacher_name))
 
     if not all_excel_files:
         print("❌ Не найдено ни одного Excel-файла в подпапках.")
         return
 
-    print(f"🔍 Найдено {len(all_excel_files)} Excel-файлов.")
+    print(f"🔍 Найдено {len(all_excel_files)} Excel-файлов у {len(found_teachers)} преподавателей.")
 
-    # --- Шаг 4: Экспорт нужных листов в PDF ---
+    # --- Экспорт нужных листов в PDF ---
     excel_app = win32.gencache.EnsureDispatch('Excel.Application')
     excel_app.Visible = False
     excel_app.DisplayAlerts = False
 
-    found_sheets = []  # (school_code, app_num, pdf_path)
+    found_sheets = []  # (school_code, app_num, pdf_path, teacher_name, sheet_name)
 
-    for excel_path in all_excel_files:
+    for excel_path, teacher_name in all_excel_files:
         try:
+            # Проверяем, есть ли информация о листах для этого преподавателя
+            if teacher_name not in sheet_info_by_teacher:
+                print(f"  ⚠️ Нет данных о листах для преподавателя: {teacher_name}")
+                continue
+
             wb = excel_app.Workbooks.Open(str(excel_path))
             sheet_names_in_file = [s.Name for s in wb.Sheets]
+
             for sheet_name in sheet_names_in_file:
                 if sheet_name in ("Служебное", "Списки классов"):
                     continue
-                if sheet_name not in sheet_info:
+
+                # Проверяем, есть ли такой лист у этого преподавателя в справочнике
+                if sheet_name not in sheet_info_by_teacher[teacher_name]:
                     continue
 
-                app_num, school_code, _ = sheet_info[sheet_name]
-                pdf_path = os.path.join(output_folder, f"{sheet_name}.pdf")
+                app_num, school_code = sheet_info_by_teacher[teacher_name][sheet_name]
+                pdf_path = os.path.join(output_folder, f"{teacher_name}_{sheet_name}.pdf")
+
                 ws = wb.Worksheets(sheet_name)
+                # Обновляем номер приложения и устанавливаем область печати
+                update_app_number_and_set_print_area(ws, app_num)
+
+                # Экспортируем только область печати
                 ws.ExportAsFixedFormat(0, os.path.abspath(pdf_path))
-                found_sheets.append((school_code, app_num, pdf_path))
-                print(f"✅ Экспортирован: {sheet_name}")
-            wb.Close(SaveChanges=False)
+                found_sheets.append((school_code, app_num, pdf_path, teacher_name, sheet_name))
+                print(f"✅ Экспортирован: {teacher_name}/{sheet_name} (Приложение №{app_num})")
+
+            wb.Close(SaveChanges=True)  # Сохраняем изменения (обновленные номера приложений)
         except Exception as e:
-            print(f"⚠️ Ошибка при обработке {excel_path}: {e}")
+            print(f"⚠️ Ошибка при обработке {excel_path} ({teacher_name}): {e}")
 
     excel_app.Quit()
 
@@ -178,68 +216,71 @@ def main():
         print("❌ Ни один лист из справочника не найден в Excel-файлах.")
         return
 
-    # --- Шаг 5: Подготовка титульных листов ---
-    title_docs_ready = True
-    for code in SCHOOL_TO_CODE.values():
-        if not os.path.exists(f"title_{code}.docx"):
-            title_docs_ready = False
-            break
+    print(f"✅ Найдено {len(found_sheets)} ведомостей для включения в итоговые PDF.")
 
-    if not title_docs_ready:
-        print("\n❗ Отсутствуют файлы title_*.docx. Попытка автоматического разделения...")
-        if not split_title_docx(TEMPLATE_DOCX, output_folder):
-            print("❌ Пожалуйста, сохраните вручную 5 титульных .docx в папке со скриптом:")
-            for code in ["13", "16", "17", "22", "АГ"]:
-                print(f"   title_{code}.docx")
-            return
-
-    # Конвертируем титулы в PDF
-    word_app = win32.gencache.EnsureDispatch('Word.Application')
-    word_app.Visible = False
-    word_app.DisplayAlerts = False
-
+    # --- Проверка наличия титульных PDF ---
     title_pdfs = {}
     for code in ["13", "16", "17", "22", "АГ"]:
-        docx_path = f"title_{code}.docx"
         pdf_path = os.path.join(output_folder, f"title_{code}.pdf")
-        try:
-            doc = word_app.Documents.Open(os.path.abspath(docx_path))
-            doc.ExportAsFixedFormat(os.path.abspath(pdf_path), 17)  # 17 = PDF
-            doc.Close()
+        if os.path.exists(pdf_path):
             title_pdfs[code] = pdf_path
-            print(f"✅ Титульный лист для {SCHOOL_NAMES[code]} сохранён.")
-        except Exception as e:
-            print(f"⚠️ Не удалось создать титульный PDF для {code}: {e}")
-            title_pdfs[code] = None
+        else:
+            print(f"❌ Отсутствует титульный PDF: {pdf_path}")
+            print("❗ Пожалуйста, поместите подписанные титулы в папку вывода с именами:")
+            print("    title_13.pdf, title_16.pdf, title_17.pdf, title_22.pdf, title_АГ.pdf")
+            return
 
-    word_app.Quit()
-
-    # --- Шаг 6: Сборка итоговых PDF ---
+    # --- Сборка итоговых PDF ---
     from collections import defaultdict
     groups = defaultdict(list)
-    for school, app_num, pdf in found_sheets:
-        groups[school].append((app_num, pdf))
+    for school, app_num, pdf_path, teacher_name, sheet_name in found_sheets:
+        groups[school].append((app_num, pdf_path, teacher_name, sheet_name))
+
+    # Функция для преобразования номера приложения в числовой формат для сортировки
+    def app_num_to_sort_key(app_num_str):
+        if not app_num_str:
+            return (999, 0)  # Последнее место для пустых значений
+
+        # Если номер приложения - диапазон (например, "1-2")
+        if '-' in app_num_str:
+            parts = app_num_str.split('-')
+            try:
+                first_num = float(parts[0].strip())
+                return (first_num, 0)
+            except ValueError:
+                return (999, 0)
+
+        # Пробуем преобразовать в число
+        try:
+            return (float(app_num_str.strip()), 0)
+        except ValueError:
+            # Если не число, разбиваем на текстовую и числовую части
+            match = re.match(r'(\D*)(\d+)', app_num_str.strip())
+            if match:
+                text_part = match.group(1)
+                num_part = int(match.group(2))
+                return (num_part, text_part)
+            return (999, app_num_str)
 
     for school_code, items in groups.items():
-        items.sort(key=lambda x: x[0])  # сортировка по номеру приложения
+        # Сортируем по номеру приложения, а при одинаковых номерах - по имени преподавателя
+        items.sort(key=lambda x: (app_num_to_sort_key(x[0]), x[2]))
+
         writer = PdfWriter()
 
-        # Добавляем титульный лист
-        title_pdf = title_pdfs.get(school_code)
-        if title_pdf and os.path.exists(title_pdf):
-            writer.append(PdfReader(title_pdf))
-        else:
-            print(f"⚠️ Пропущен титульный лист для {SCHOOL_NAMES[school_code]}")
+        # Титульный лист
+        writer.append(PdfReader(title_pdfs[school_code]))
 
-        # Добавляем ведомости
-        for _, pdf_path in items:
+        # Ведомости
+        for app_num, pdf_path, teacher_name, sheet_name in items:
             if os.path.exists(pdf_path):
                 writer.append(PdfReader(pdf_path))
+                print(f"  ➕ Добавлено: Приложение №{app_num} ({teacher_name}/{sheet_name})")
 
         output_path = os.path.join(output_folder, f"Ведомости_{SCHOOL_NAMES[school_code]}.pdf")
         with open(output_path, "wb") as f:
             writer.write(f)
-        print(f"📄 Создан итоговый PDF: {output_path}")
+        print(f"📄 Создан итоговый PDF: {output_path} ({len(items)} приложений)")
 
     print("\n🎉 Готово! Все PDF-файлы сформированы.")
 
