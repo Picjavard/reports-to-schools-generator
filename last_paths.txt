@@ -1,0 +1,3 @@
+reference=C:/Users/alexd/OneDrive/Документы/Тестовая папка с ведомостями/Список ведомостей.xlsx
+input=C:/Users/alexd/Downloads/Ведомости для школ 07.03.2026
+output=C:/Users/alexd/Downloads/Ведомости для школ 07.03.2026/Итог

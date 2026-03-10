@@ -7,7 +7,6 @@ import win32com.client as win32
 from tkinter import Tk, filedialog
 import re
 import pythoncom
-import time
 import logging
 from datetime import datetime
 
@@ -31,9 +30,10 @@ SCHOOL_NAMES = {
 }
 
 
-def setup_logging(output_folder):
+def setup_logging(output_folder, mode):
     """Настройка логирования"""
-    log_file = os.path.join(output_folder, f"processing_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    suffix = "_итоговые" if mode == "final" else ""
+    log_file = os.path.join(output_folder, f"processing_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}.log")
     logging.basicConfig(
         level=logging.DEBUG,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -60,68 +60,74 @@ def get_excel_cell_value(ws, row, col):
         return None
 
 
-def update_app_number_and_set_print_area(ws, app_num_from_ref):
-    """Находит ячейку с 'ПРИЛОЖЕНИЕ' в первой строке, обновляет номер и устанавливает область печати"""
+def update_app_number_and_set_print_area(ws, app_num_from_ref, mode="current"):
+    """Находит ячейки с 'ПРИЛОЖЕНИЕ' и устанавливает область печати"""
     try:
-        app_column = None
-        app_cell = None
+        app_cells = []  # (row, col, value)
 
-        # Ищем ячейку с "ПРИЛОЖЕНИЕ" в первых 5 строках и 50 столбцах
-        for row in range(1, 6):  # Проверяем первые 5 строк
-            for col in range(1, 51):  # Проверяем первые 50 столбцов
+        # Ищем ячейки "ПРИЛОЖЕНИЕ" в первых 5 строках
+        for row in range(1, 6):
+            for col in range(1, 61):
                 cell_value = get_excel_cell_value(ws, row, col)
                 if cell_value and isinstance(cell_value, str) and "ПРИЛОЖЕНИЕ" in cell_value:
-                    app_column = col
-                    app_cell = ws.Cells(row, col)
-                    logging.info(f"  📌 Найдена ячейка с 'ПРИЛОЖЕНИЕ' в строке {row}, столбце {col}: {cell_value}")
-                    break
-            if app_cell:
+                    app_cells.append((row, col, cell_value))
+                    # Для итоговых достаточно 2 ячеек
+                    if mode == "final" and len(app_cells) >= 2:
+                        break
+            if mode == "final" and len(app_cells) >= 2:
                 break
 
-        if not app_cell:
-            logging.warning(f"  ⚠️ Не найдена ячейка с 'ПРИЛОЖЕНИЕ' в заголовке")
+        if not app_cells:
+            logging.warning("  ⚠️ Не найдены ячейки 'ПРИЛОЖЕНИЕ'")
             return False
 
-        # Обновление номера приложения
-        if app_num_from_ref:
-            if isinstance(app_num_from_ref, str) and '-' in app_num_from_ref:
-                new_text = f"ПРИЛОЖЕНИЕ №{app_num_from_ref}"
-            else:
-                new_text = f"ПРИЛОЖЕНИЕ №{app_num_from_ref}"
+        # === ОПРЕДЕЛЕНИЕ ГРАНИЦ ===
+        if mode == "current":
+            # ТЕКУЩИЕ: от столбца A до ПЕРВОЙ ячейки (включительно)
+            target_row, target_col, _ = app_cells[0]
+            start_col = 1
+            end_col = target_col
+            logging.info(f"  📊 ТЕКУЩИЕ: столбцы A-{chr(64 + end_col)}")
 
-            app_cell.Value = new_text
-            logging.info(f"  ✏️ Обновлен номер приложения: {new_text}")
+        elif mode == "final":
+            # ИТОГОВЫЕ: от столбца ПОСЛЕ ПЕРВОЙ ячейки до ВТОРОЙ ячейки
+            if len(app_cells) < 2:
+                logging.warning("  ⚠️ Для итоговых требуется 2 ячейки 'ПРИЛОЖЕНИЕ'")
+                return False  # Пропускаем лист без второй ячейки
 
-        # --- ИСПРАВЛЕНО: ЭФФЕКТИВНЫЙ ПОИСК ПОСЛЕДНЕЙ СТРОКИ ---
-        # Вместо перебора всех строк используем метод Excel End(xlUp)
+            _, first_col, _ = app_cells[0]
+            target_row, target_col, _ = app_cells[1]
+            start_col = first_col + 1  # НАЧИНАЕМ СЛЕДУЮЩИМ СТОЛБЦОМ
+            end_col = target_col
+            logging.info(f"  📊 ИТОГОВЫЕ: столбцы {chr(64 + start_col)}-{chr(64 + end_col)}")
+
+        # Обновляем номер приложения во ВТОРОЙ ячейке для итоговых
+        cell_to_update = ws.Cells(target_row, target_col)
+        new_text = f"ПРИЛОЖЕНИЕ №{app_num_from_ref}" if isinstance(app_num_from_ref,
+                                                                   str) and '-' not in app_num_from_ref else f"ПРИЛОЖЕНИЕ №{app_num_from_ref}"
+        cell_to_update.Value = new_text
+        logging.info(f"  ✏️ Номер приложения: {new_text}")
+
+        # Последняя строка (без зависания!)
         try:
-            last_row = ws.Cells(ws.Rows.Count, 1).End(-4162).Row  # -4162 = xlUp
-            # Ограничиваем максимальное количество строк (на случай, если в столбце A нет данных)
-            if last_row > 200:  # Ограничение на 200 строк (достаточно для 2 страниц)
-                last_row = 200
-            logging.info(f"  📏 Последняя строка с данными: {last_row}")
-        except Exception as e:
-            logging.warning(f"  ⚠️ Ошибка при определении последней строки, используем значение по умолчанию: {e}")
-            last_row = 200  # Значение по умолчанию (2 страницы)
+            last_row = ws.Cells(ws.Rows.Count, start_col).End(-4162).Row
+            last_row = min(last_row, 200)  # Ограничение на 200 строк
+        except:
+            last_row = 200
 
-        # Установка области печати
-        if app_column:
-            end_col = app_column
-            # Ограничиваем количество столбцов (максимум 30 столбцов - достаточно для 2 страниц вправо)
-            if end_col > 30:
-                end_col = 30
+        # Устанавливаем область печати
+        ws.PageSetup.PrintArea = ws.Range(
+            ws.Cells(1, start_col),
+            ws.Cells(last_row, end_col)
+        ).Address
 
-            print_area_range = ws.Range(ws.Cells(1, 1), ws.Cells(last_row, end_col))
-            ws.PageSetup.PrintArea = print_area_range.Address
-
-            logging.info(f"  📐 Область печати установлена: A1:{chr(64 + end_col)}{last_row}")
-            return True
-        else:
-            logging.warning("  ⚠️ Не удалось определить столбец для области печати")
-            return False
+        start_letter = chr(64 + start_col) if start_col <= 26 else f"A{chr(64 + start_col - 26)}"
+        end_letter = chr(64 + end_col) if end_col <= 26 else f"A{chr(64 + end_col - 26)}"
+        logging.info(f"  📐 Область печати: {start_letter}1:{end_letter}{last_row}")
+        return True
 
     except Exception as e:
-        logging.error(f"  ⚠️ Ошибка при обновлении номера приложения и установке области печати: {e}")
+        logging.error(f"  ⚠️ Ошибка настройки печати: {e}")
         return False
 
 
@@ -154,6 +160,12 @@ def initialize_excel():
 
 
 def main():
+    # === ВЫБОР РЕЖИМА ===
+    REPORT_MODE = "current"  # <-- МЕНЯЙТЕ ЗДЕСЬ: "current" или "final"
+
+    mode_name = "итоговые" if REPORT_MODE == "final" else "текущие"
+    print(f"\n✅ Режим: {mode_name.upper()} ведомости\n")
+
     # --- Выбор папок ---
     root = Tk()
     root.withdraw()
@@ -173,9 +185,10 @@ def main():
         print("❌ Не выбрана выходная папка")
         return
 
-    # Настройка логирования
-    log_file = setup_logging(output_folder)
+    # Настройка логирования — ИСПРАВЛЕНО: REPORT_MODE вместо report_mode
+    log_file = setup_logging(output_folder, REPORT_MODE)
     logging.info("=== НАЧАЛО ОБРАБОТКИ ===")
+    logging.info(f"Режим: {mode_name} ведомости")
     logging.info(f"Входная папка: {input_folder}")
     logging.info(f"Выходная папка: {output_folder}")
     logging.info(f"Файл лога: {log_file}")
@@ -266,7 +279,7 @@ def main():
 
     found_sheets = []  # (school_code, app_num, pdf_path, teacher_name, sheet_name)
 
-    logging.info("\n⚙️ Обработка Excel-файлов:")
+    logging.info(f"\n⚙️ Обработка Excel-файлов (режим: {mode_name}):")
     for excel_path, folder_name, folder_surname in all_excel_files:
         try:
             logging.info(f"\n📁 Обработка файла: {excel_path.name} (папка: {folder_name}, фамилия: {folder_surname})")
@@ -293,20 +306,33 @@ def main():
                     continue
 
                 app_num, school_code = sheet_info_by_teacher[folder_surname][sheet_name]
-                pdf_path = os.path.join(output_folder, f"{folder_surname}_{sheet_name}.pdf")
+                # Добавляем суффикс для итоговых ведомостей в имя файла
+                # На эту:
+                suffix = "_итоговые" if REPORT_MODE == "final" else ""
+                pdf_path = os.path.join(output_folder, f"{folder_surname}_{sheet_name}{suffix}.pdf")
 
                 logging.info(f"  📄 Найден нужный лист: {sheet_name} (Приложение №{app_num})")
                 ws = wb.Worksheets(sheet_name)
 
-                # Обновляем номер приложения и устанавливаем область печати
-                if update_app_number_and_set_print_area(ws, app_num):
+                # Обновляем номер приложения и устанавливаем область печати с учётом режима
+                if update_app_number_and_set_print_area(ws, app_num, mode=REPORT_MODE):
                     logging.info(f"  ✅ Успешно настроена область печати для {sheet_name}")
                 else:
-                    logging.warning(f"  ⚠️ Не удалось настроить область печати для {sheet_name}, используем весь лист")
+                    if REPORT_MODE == "final":
+                        logging.warning(f"  ⚠️ Пропускаем лист (нет данных для итоговых ведомостей): {sheet_name}")
+                        continue
+                    else:
+                        logging.warning(
+                            f"  ⚠️ Не удалось настроить область печати для {sheet_name}, используем весь лист")
 
                 # Экспортируем только область печати
                 logging.info(f"  🖨️ Экспорт в PDF: {sheet_name} → {os.path.basename(pdf_path)}")
-                ws.ExportAsFixedFormat(0, os.path.abspath(pdf_path))
+                try:
+                    ws.ExportAsFixedFormat(0, os.path.abspath(pdf_path))
+                    logging.info(f"  ✅ Экспорт завершён: {os.path.basename(pdf_path)}")
+                except Exception as e:
+                    logging.error(f"  ❌ Ошибка экспорта: {e}")
+                    continue  # Пропускаем проблемный лист, не зависаем
                 found_sheets.append((school_code, app_num, pdf_path, folder_name, sheet_name))
                 logging.info(f"✅ Экспортирован: {folder_name}/{sheet_name} (Приложение №{app_num})")
 
@@ -345,16 +371,26 @@ def main():
 
     # --- Проверка наличия титульных PDF ---
     title_pdfs = {}
+    missing_titles = []
     for code in ["13", "16", "17", "22", "АГ"]:
-        pdf_path = os.path.join(output_folder, f"title_{code}.pdf")
+        # Для итоговых ведомостей используем отдельные титульные листы
+        title_filename = f"title_{code}_итоговые.pdf" if REPORT_MODE == "final" else f"title_{code}.pdf"
+        pdf_path = os.path.join(output_folder, title_filename)
+
+        # Если отдельного титульного для итоговых нет — используем обычный
+        if not os.path.exists(pdf_path) and REPORT_MODE == "final":
+            pdf_path = os.path.join(output_folder, f"title_{code}.pdf")
+
         if os.path.exists(pdf_path):
             title_pdfs[code] = pdf_path
             logging.info(f"✅ Найден титульный PDF для школы {code}: {pdf_path}")
         else:
-            logging.error(f"❌ Отсутствует титульный PDF: {pdf_path}")
-            logging.error("❗ Пожалуйста, поместите подписанные титулы в папку вывода с именами:")
-            logging.error("    title_13.pdf, title_16.pdf, title_17.pdf, title_22.pdf, title_АГ.pdf")
-            return
+            missing_titles.append(code)
+            logging.warning(f"⚠️ Отсутствует титульный лист для школы {code}, продолжаем без него")
+
+    if missing_titles:
+        logging.warning(f"❗ Не найдены титульные листы для школ: {', '.join(missing_titles)}")
+        logging.warning("📄 Сборка продолжится БЕЗ титульных листов.")
 
     # --- Сборка итоговых PDF ---
     from collections import defaultdict
@@ -365,9 +401,8 @@ def main():
     # Функция для преобразования номера приложения в числовой формат для сортировки
     def app_num_to_sort_key(app_num_str):
         if not app_num_str:
-            return (999, 0)  # Последнее место для пустых значений
+            return (999, 0)
 
-        # Если номер приложения - диапазон (например, "1-2")
         if '-' in app_num_str:
             parts = app_num_str.split('-')
             try:
@@ -376,11 +411,9 @@ def main():
             except ValueError:
                 return (999, 0)
 
-        # Пробуем преобразовать в число
         try:
             return (float(app_num_str.strip()), 0)
         except ValueError:
-            # Если не число, разбиваем на текстовую и числовую части
             match = re.match(r'(\D*)(\d+)', app_num_str.strip())
             if match:
                 text_part = match.group(1)
@@ -388,16 +421,19 @@ def main():
                 return (num_part, text_part)
             return (999, app_num_str)
 
-    logging.info("\n📄 Сборка итоговых PDF по школам:")
+    logging.info(f"\n📄 Сборка итоговых PDF по школам (режим: {mode_name}):")
     for school_code, items in groups.items():
-        # Сортируем по номеру приложения, а при одинаковых номерах - по имени преподавателя
+        # Сортируем по номеру приложения
         items.sort(key=lambda x: (app_num_to_sort_key(x[0]), x[2]))
 
         writer = PdfWriter()
 
-        # Титульный лист
-        logging.info(f"  📑 Добавление титульного листа для {SCHOOL_NAMES[school_code]}")
-        writer.append(PdfReader(title_pdfs[school_code]))
+        # Титульный лист (если есть)
+        if school_code in title_pdfs:
+            logging.info(f"  📑 Добавление титульного листа для {SCHOOL_NAMES[school_code]}")
+            writer.append(PdfReader(title_pdfs[school_code]))
+        else:
+            logging.warning(f"  ⚠️ Титульный лист для {SCHOOL_NAMES[school_code]} отсутствует, пропускаем")
 
         # Ведомости
         for app_num, pdf_path, teacher_name, sheet_name in items:
@@ -405,20 +441,23 @@ def main():
                 logging.info(f"  ➕ Добавлено: Приложение №{app_num} ({teacher_name}/{sheet_name})")
                 writer.append(PdfReader(pdf_path))
 
-        output_path = os.path.join(output_folder, f"Ведомости_{SCHOOL_NAMES[school_code]}.pdf")
+        # Формируем имя итогового файла
+        suffix = "_итоговые" if REPORT_MODE == "final" else ""
+        output_path = os.path.join(output_folder, f"Ведомости_{SCHOOL_NAMES[school_code]}{suffix}.pdf")
         with open(output_path, "wb") as f:
             writer.write(f)
         logging.info(f"✅ Создан итоговый PDF: {output_path} ({len(items)} приложений)")
 
-    logging.info("\n🎉 ГОТОВО! Все PDF-файлы сформированы.")
+    logging.info(f"\n🎉 ГОТОВО! Все {mode_name} PDF-файлы сформированы.")
     logging.info(f"📄 Список созданных файлов:")
     for school_code in groups.keys():
-        output_path = os.path.join(output_folder, f"Ведомости_{SCHOOL_NAMES[school_code]}.pdf")
+        suffix = "_итоговые" if REPORT_MODE == "final" else ""
+        output_path = os.path.join(output_folder, f"Ведомости_{SCHOOL_NAMES[school_code]}{suffix}.pdf")
         logging.info(f"  - {output_path}")
 
     # Выводим в консоль краткую информацию о результатах
-    print("\n✅ Обработка завершена успешно!")
-    print(f"📄 Создано PDF-файлов для школ: {len(groups)}")
+    print(f"\n✅ Обработка завершена успешно!")
+    print(f"📄 Создано {mode_name} PDF-файлов для школ: {len(groups)}")
     for school_code in groups.keys():
         print(f"  - {SCHOOL_NAMES[school_code]} ({len(groups[school_code])} приложений)")
     print(f"\n📜 Полный лог сохранен в файл: {log_file}")
