@@ -191,10 +191,14 @@ class VedomostiApp:
             return None
 
     def update_app_number_and_set_print_area(self, ws, app_num_from_ref, mode="current"):
+        """Находит ячейки с 'ПРИЛОЖЕНИЕ' и устанавливает область печати"""
         try:
             app_cells = []
+
+            # Ищем ячейки "ПРИЛОЖЕНИЕ" в первых 5 строках
             for row in range(1, 6):
                 for col in range(1, 61):
+                    # ИСПРАВЛЕНИЕ: добавляем self.
                     cell_value = self.get_excel_cell_value(ws, row, col)
                     if cell_value and isinstance(cell_value, str) and "ПРИЛОЖЕНИЕ" in cell_value:
                         app_cells.append((row, col, cell_value))
@@ -207,13 +211,16 @@ class VedomostiApp:
                 self.log("Не найдены ячейки 'ПРИЛОЖЕНИЕ'", "WARNING")
                 return False
 
+            # === ОПРЕДЕЛЕНИЕ ГРАНИЦ ===
             if mode == "current":
+                # ТЕКУЩИЕ: от столбца A до ПЕРВОЙ ячейки (включительно)
                 target_row, target_col, _ = app_cells[0]
                 start_col = 1
                 end_col = target_col
                 self.log(f"ТЕКУЩИЕ: столбцы A-{chr(64 + end_col)}", "INFO")
 
             elif mode == "final":
+                # ИТОГОВЫЕ: от столбца ПОСЛЕ ПЕРВОЙ ячейки до ВТОРОЙ ячейки
                 if len(app_cells) < 2:
                     self.log("Для итоговых требуется 2 ячейки 'ПРИЛОЖЕНИЕ'", "WARNING")
                     return False
@@ -223,6 +230,12 @@ class VedomostiApp:
                 start_col = first_col + 1
                 end_col = target_col
                 self.log(f"ИТОГОВЫЕ: столбцы {chr(64 + start_col)}-{chr(64 + end_col)}", "INFO")
+
+            # === ИСПРАВЛЕНИЕ: Очищаем существующую область печати ===
+            try:
+                ws.PageSetup.PrintArea = ""  # Очищаем перед установкой новой
+            except:
+                pass  # Игнорируем ошибки очистки
 
             # Обновляем номер приложения
             cell_to_update = ws.Cells(target_row, target_col)
@@ -236,11 +249,29 @@ class VedomostiApp:
             except:
                 last_row = 200
 
+            # === ИСПРАВЛЕНИЕ: Удаляем именованный диапазон Print_Area если он существует ===
+            try:
+                # Проверяем и удаляем именованный диапазон Print_Area
+                for name in ws.Parent.Names:
+                    if name.Name in ["Print_Area", "PrintArea"]:
+                        try:
+                            name.Delete()
+                        except:
+                            pass
+            except:
+                pass
+
             # Устанавливаем область печати
-            ws.PageSetup.PrintArea = ws.Range(
-                ws.Cells(1, start_col),
-                ws.Cells(last_row, end_col)
-            ).Address
+            try:
+                print_area_range = ws.Range(ws.Cells(1, start_col), ws.Cells(last_row, end_col))
+                ws.PageSetup.PrintArea = print_area_range.Address
+            except Exception as e:
+                # Альтернативный метод установки области печати
+                try:
+                    ws.PageSetup.PrintArea = f"{chr(64 + start_col)}1:{chr(64 + end_col)}{last_row}"
+                except Exception as e2:
+                    self.log(f"Не удалось установить область печати: {e2}", "ERROR")
+                    return False
 
             return True
 
